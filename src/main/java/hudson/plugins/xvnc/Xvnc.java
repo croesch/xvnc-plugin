@@ -11,8 +11,10 @@ import hudson.model.AbstractProject;
 import hudson.model.Computer;
 import hudson.model.Hudson;
 import hudson.model.Node;
+import hudson.tasks.BuildStepMonitor;
 import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrapperDescriptor;
+import hudson.tasks.Recorder;
 import hudson.util.FormValidation;
 
 import java.io.File;
@@ -43,12 +45,15 @@ public class Xvnc extends BuildWrapper {
 
     public Boolean useXauthority;
 
+    public boolean killXvncAsPostAction;
+
     private static final String FILENAME_SCREENSHOT = "screenshot.jpg";
 
     @DataBoundConstructor
-    public Xvnc(boolean takeScreenshot, boolean useXauthority) {
+    public Xvnc(boolean takeScreenshot, boolean useXauthority, boolean killXvncAsPostAction) {
         this.takeScreenshot = takeScreenshot;
         this.useXauthority = useXauthority;
+        this.killXvncAsPostAction = killXvncAsPostAction;
     }
 
     @Override
@@ -123,9 +128,29 @@ public class Xvnc extends BuildWrapper {
             vncserverCommand = null;
         }
 
+        if (killXvncAsPostAction) {
+            build.getProject().getPublishersList().add(new Recorder() {
+                @Override
+                public boolean perform(AbstractBuild<?, ?> build, Launcher launcher, BuildListener listener)
+                        throws InterruptedException, IOException {
+                    try {
+                        new Killer(takeScreenshot, build, logger, launcher, xauthorityEnv, displayNumber, vncserverCommand, proc,
+                                allocator, xauthority).run();
+                    } finally {
+                        build.getProject().getPublishersList().remove(this);
+                    }
+                    return true;
+                }
+
+                public BuildStepMonitor getRequiredMonitorService() {
+                    return BuildStepMonitor.NONE;
+                }
+            });
+        }
+
         return new Environment() {
 
-                @Override
+            @Override
             public void buildEnvVars(Map<String, String> env) {
                 env.put("DISPLAY",":"+displayNumber);
                 env.putAll(xauthorityEnv);
@@ -133,27 +158,10 @@ public class Xvnc extends BuildWrapper {
 
             @Override
             public boolean tearDown(AbstractBuild build, BuildListener listener) throws IOException, InterruptedException {
-                if (takeScreenshot) {
-                    FilePath ws = build.getWorkspace();
-                    File artifactsDir = build.getArtifactsDir();
-                    artifactsDir.mkdirs();
-                    logger.println(Messages.Xvnc_TAKING_SCREENSHOT());
-                    launcher.launch().cmds("echo", "$XAUTHORITY").envs(xauthorityEnv).stdout(logger).pwd(ws).join();
-                    launcher.launch().cmds("ls", "-l", "$XAUTHORITY").envs(xauthorityEnv).stdout(logger).pwd(ws).join();
-                    launcher.launch().cmds("import", "-window", "root", "-display", ":" + displayNumber, FILENAME_SCREENSHOT).
-                            envs(xauthorityEnv).stdout(logger).pwd(ws).join();
-                    ws.child(FILENAME_SCREENSHOT).copyTo(new FilePath(artifactsDir).child(FILENAME_SCREENSHOT));
+                if (!killXvncAsPostAction) {
+                    new Killer(takeScreenshot, build, logger, launcher, xauthorityEnv, displayNumber, vncserverCommand, proc,
+                            allocator, xauthority).run();
                 }
-                logger.println(Messages.Xvnc_TERMINATING());
-                if (vncserverCommand != null) {
-                    // #173: stopping the wrapper script will accomplish nothing. It has already exited, in fact.
-                    launcher.launch().cmds(vncserverCommand, "-kill", ":" + displayNumber).envs(xauthorityEnv).stdout(logger).join();
-                } else {
-                    // Assume it can be shut down by being killed.
-                    proc.kill();
-                }
-                allocator.free(displayNumber);
-                xauthority.delete();
                 return true;
             }
         };
@@ -263,5 +271,58 @@ public class Xvnc extends BuildWrapper {
     public Object readResolve() {
         if (useXauthority == null) useXauthority = true;
         return this;
+    }
+
+    private static class Killer {
+        private boolean takeScreenshot;
+        private AbstractBuild<?, ?> build;
+        private PrintStream logger;
+        private Launcher launcher;
+        private Map<String, String> xauthorityEnv;
+        private int displayNumber;
+        private String vncserverCommand;
+        private Proc proc;
+        private DisplayAllocator allocator;
+        private FilePath xauthority;
+
+        public Killer(boolean takeScreenshot, AbstractBuild<?, ?> build, PrintStream logger, Launcher launcher,
+                Map<String, String> xauthorityEnv, int displayNumber, String vncserverCommand, Proc proc,
+                DisplayAllocator allocator, FilePath xauthority) {
+            this.takeScreenshot = takeScreenshot;
+            this.build = build;
+            this.logger = logger;
+            this.launcher = launcher;
+            this.xauthorityEnv = xauthorityEnv;
+            this.displayNumber = displayNumber;
+            this.vncserverCommand = vncserverCommand;
+            this.proc = proc;
+            this.allocator = allocator;
+            this.xauthority = xauthority;
+        }
+
+        public void run() throws IOException, InterruptedException {
+            if (takeScreenshot) {
+                FilePath ws = build.getWorkspace();
+                File artifactsDir = build.getArtifactsDir();
+                artifactsDir.mkdirs();
+                logger.println(Messages.Xvnc_TAKING_SCREENSHOT());
+                launcher.launch().cmds("echo", "$XAUTHORITY").envs(xauthorityEnv).stdout(logger).pwd(ws).join();
+                launcher.launch().cmds("ls", "-l", "$XAUTHORITY").envs(xauthorityEnv).stdout(logger).pwd(ws).join();
+                launcher.launch().cmds("import", "-window", "root", "-display", ":" + displayNumber, FILENAME_SCREENSHOT)
+                        .envs(xauthorityEnv).stdout(logger).pwd(ws).join();
+                ws.child(FILENAME_SCREENSHOT).copyTo(new FilePath(artifactsDir).child(FILENAME_SCREENSHOT));
+            }
+            logger.println(Messages.Xvnc_TERMINATING());
+            if (vncserverCommand != null) {
+                // #173: stopping the wrapper script will accomplish nothing. It
+                // has already exited, in fact.
+                launcher.launch().cmds(vncserverCommand, "-kill", ":" + displayNumber).envs(xauthorityEnv).stdout(logger).join();
+            } else {
+                // Assume it can be shut down by being killed.
+                proc.kill();
+            }
+            allocator.free(displayNumber);
+            xauthority.delete();
+        }
     }
 }

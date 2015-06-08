@@ -8,4 +8,9 @@
       <f:checkbox checked="${instance == null || instance.useXauthority}"/>
         <label class="attach-previous">${%Create a dedicated Xauthority file per build?}</label>
   </f:entry>
+
+  <f:entry field="killXvncAsPostAction">
+      <f:checkbox checked="${instance == null || instance.killXvncAsPostAction}"/>
+        <label class="attach-previous">${%Kill Xvnc server as post build action?}</label>
+  </f:entry>
 </j:jelly>
